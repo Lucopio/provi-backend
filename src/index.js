@@ -1,29 +1,50 @@
+// src/index.js
 import dotenv from 'dotenv';
 dotenv.config();
 
-// DEBUG: comprueba que las variables de entorno estén cargadas
-console.log('▶ OPENAI_API_KEY cargada:', Boolean(process.env.OPENAI_API_KEY));
-console.log('▶ OPENAI_MODEL:', process.env.OPENAI_MODEL);
-
 import express from 'express';
 import mongoose from 'mongoose';
-import cors from 'cors'; // Importa cors
+import cors from 'cors';
 import perfilesRouter from './routes/perfiles.js';
 
 const app = express();
 
-// CONFIGURACIÓN CORS EXPLÍCITA PARA PRODUCCIÓN
-app.use(cors({
-  origin: 'https://provi-sigma.vercel.app',  // Dominio frontend en Vercel
+/* ──────────────────────────────────────────────────────────
+   CORS con allow-list desde ENV
+   En Render define CORS_ORIGINS (coma-separado), p.ej:
+   https://provi-sigma.vercel.app,https://pbeta-flame.vercel.app,http://localhost:5500
+────────────────────────────────────────────────────────── */
+function parseOrigins(listStr = '') {
+  return listStr.split(',').map(s => s.trim()).filter(Boolean);
+}
+const ALLOW_ORIGINS = parseOrigins(process.env.CORS_ORIGINS || '');
+
+// “Vary: Origin” para caches
+app.use((req, res, next) => { res.setHeader('Vary', 'Origin'); next(); });
+
+const corsOptions = {
+  origin(origin, cb) {
+    // Permite herramientas sin Origin (curl, healthchecks)
+    if (!origin) return cb(null, true);
+    if (ALLOW_ORIGINS.includes(origin)) return cb(null, true);
+    return cb(new Error(`CORS no permitido para: ${origin}`), false);
+  },
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true,
-}));
-app.options('*', cors()); // Responde a preflight OPTIONS
+};
 
-app.use(express.json());
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions)); // Preflight
 
-// Conecta MongoDB
+/* ──────────────────────────────────────────────────────────
+   Body parser
+────────────────────────────────────────────────────────── */
+app.use(express.json({ limit: '2mb' }));
+
+/* ──────────────────────────────────────────────────────────
+   MongoDB
+────────────────────────────────────────────────────────── */
 mongoose
   .connect(process.env.MONGODB_URI)
   .then(() => console.log('✅ Conectado a MongoDB'))
@@ -32,14 +53,41 @@ mongoose
     process.exit(1);
   });
 
-// Monta el router
+/* ──────────────────────────────────────────────────────────
+   Rutas utilitarias
+────────────────────────────────────────────────────────── */
+// Raíz informativa (evita “Cannot GET /”)
+app.get('/', (req, res) => {
+  res.type('text').send('Provi backend OK. Revisa /api/health');
+});
+
+// Healthcheck para validar CORS/ENV
+app.get('/api/health', (req, res) => {
+  res.json({
+    ok: true,
+    allow: ALLOW_ORIGINS,
+    model: process.env.OPENAI_MODEL || 'gpt-4o',
+    mongo: mongoose.connection.readyState === 1 ? 'connected' : 'not-ready',
+  });
+});
+
+/* ──────────────────────────────────────────────────────────
+   API real
+────────────────────────────────────────────────────────── */
 app.use('/api/perfiles', perfilesRouter);
 
-// Sirve archivos estáticos
-app.use(express.static('public'));
+/* (opcional) estáticos si usas /public */
+// app.use(express.static('public'));
 
-// Arranca servidor
-const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log(`🚀 Servidor en http://localhost:${port}`);
+/* 404 JSON */
+app.use((req, res) => {
+  res.status(404).json({ error: 'Not Found', path: req.path });
+});
+
+/* ──────────────────────────────────────────────────────────
+   Arranque
+────────────────────────────────────────────────────────── */
+const PORT = process.env.PORT || 10000; // Render inyecta PORT
+app.listen(PORT, () => {
+  console.log(`🚀 Servidor en http://localhost:${PORT}`);
 });
